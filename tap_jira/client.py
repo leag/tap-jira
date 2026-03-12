@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import sys
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -14,7 +15,7 @@ else:
     from typing_extensions import override
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Generator, Iterable
 
     from requests import Response
     from singer_sdk.helpers.types import Context
@@ -59,6 +60,33 @@ class JiraStream(RESTStream[_TNextPageToken]):
             password=self.config["api_token"],
             username=self.config["email"],
         )
+
+    @override
+    def backoff_wait_generator(self) -> Generator[float, None, None]:
+        _initial_ms = 5_000.0
+        _max_ms = 30_000.0
+        last_ms = _initial_ms
+
+        def _wait_time(exc: Exception) -> float:
+            nonlocal last_ms
+            response = getattr(exc, "response", None)
+            if response is not None:
+                retry_after = response.headers.get("Retry-After")
+                if retry_after is not None:
+                    wait_ms = float(retry_after) * 1000
+                    last_ms = wait_ms
+                    wait_ms += wait_ms * random.uniform(0.7, 1.3)  # noqa: S311
+                    self.logger.warning(
+                        "Rate limited by Jira API. Waiting %.1f seconds.",
+                        wait_ms / 1000,
+                    )
+                    return wait_ms / 1000
+            wait_ms = min(2 * last_ms, _max_ms)
+            last_ms = wait_ms
+            wait_ms += wait_ms * random.uniform(0.7, 1.3)  # noqa: S311
+            return wait_ms / 1000
+
+        return self.backoff_runtime(value=_wait_time)
 
     @override
     def get_records(self, context: Context | None) -> Iterable[dict[str, Any]]:
